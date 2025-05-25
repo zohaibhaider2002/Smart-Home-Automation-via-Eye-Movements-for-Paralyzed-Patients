@@ -1,0 +1,153 @@
+# control_receiver_laptop.py
+# Runs on Laptop or Raspberry pi 4 - Listens for commands from Pi and controls mouse/keyboard
+
+import socket
+import pyautogui
+import platform
+import time
+import numpy as np
+
+# ----------- USER SETTINGS -------------
+PORT = 9999 # Must match the port in eye_sender_pi.py
+LISTEN_IP = '0.0.0.0' # Listen on all available network interfaces
+
+
+# Calculate movement pixels based on *this* laptop's screen width
+try:
+    SCREEN_W, SCREEN_H = pyautogui.size()
+    MOVE_PERCENT = 8  # Percentage of *laptop* screen width to move cursor per command
+    MOVE_PIXELS = int(SCREEN_W * MOVE_PERCENT / 100)
+    print(f"Laptop Screen: {SCREEN_W}x{SCREEN_H}. Move: {MOVE_PERCENT}% ({MOVE_PIXELS}px)")
+except Exception as e:
+    print(f"Warning: Could not get screen size ({e}). Falling back to default move pixels.")
+    MOVE_PIXELS = 50 # Default fallback
+
+CURSOR_DURATION = 0.0 # Duration for pyautogui.moveRel (0 = instant)
+CLICK_INTERVAL = 0.1 # Minimum time between consecutive clicks (prevents accidental double clicks)
+MOVE_INTERVAL = 0.05 # Minimum time between consecutive move commands
+
+# Enable PyAutoGUI failsafe (move cursor to corner to stop) - Recommended!
+pyautogui.FAILSAFE = True
+# pyautogui.PAUSE = 0 # Optional: Ensure no PyAutoGUI default pause between actions
+# ---------------------------------------
+
+# ----------- Main Server Loop ----------
+
+server_socket = None
+conn = None
+addr = None
+commands_paused = False
+last_click_time = 0
+last_move_time = 0
+
+print("--- Control Receiver (Laptop) ---")
+print(f"Listening on IP: {LISTEN_IP} Port: {PORT}")
+print(f"Movement Pixels: {MOVE_PIXELS}")
+print("Waiting for connection from Raspberry Pi...")
+print("Move mouse to a screen corner to stop (PyAutoGUI Failsafe).")
+
+while True: # Loop to allow reconnection
+    try:
+        # --- Setup Socket ---
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Allow address reuse immediately after closing
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((LISTEN_IP, PORT))
+        server_socket.listen(1) # Listen for only one connection
+
+        conn, addr = server_socket.accept()
+        print(f"\n✅ Connection established from: {addr}")
+        commands_paused = False # Reset pause state on new connection
+        last_click_time = 0
+        last_move_time = 0
+
+        # --- Receive Data Loop ---
+        while True:
+            data = conn.recv(1024)
+            if not data:
+                print("\n🔌 Connection closed by Pi.")
+                break # Exit inner loop to wait for new connection
+
+            command = data.decode('utf-8').strip()
+            now = time.time()
+            # print(f"Received: {command}") # Uncomment for verbose logging
+
+            # --- Process Command ---
+            if command == "TOGGLE_PAUSE":
+                commands_paused = not commands_paused
+                state = "PAUSED" if commands_paused else "ACTIVE"
+                print(f"⏯️ Command execution state: {state}")
+
+            elif not commands_paused: # Only process clicks/moves if not paused
+                if command == "CLICK":
+                    if now - last_click_time > CLICK_INTERVAL:
+                        try:
+                            pyautogui.click()
+                            print("🖱️ Click executed.")
+                            last_click_time = now
+                        except Exception as e:
+                            print(f"Error executing click: {e}")
+                    # else: print("Click ignored (too soon)") # Debug
+
+                elif command == "MOVE_LEFT":
+                     if now - last_move_time > MOVE_INTERVAL:
+                        try:
+                            pyautogui.moveRel(-MOVE_PIXELS, 0, duration=CURSOR_DURATION, _pause=False)
+                            # print("⬅️ Moved Left.") # Reduce console spam
+                            last_move_time = now
+                        except Exception as e:
+                             print(f"Error executing move left: {e}")
+                     # else: print("Move ignored (too soon)") # Debug
+
+
+                elif command == "MOVE_RIGHT":
+                     if now - last_move_time > MOVE_INTERVAL:
+                        try:
+                            pyautogui.moveRel(MOVE_PIXELS, 0, duration=CURSOR_DURATION, _pause=False)
+                            # print("➡️ Moved Right.") # Reduce console spam
+                            last_move_time = now
+                        except Exception as e:
+                             print(f"Error executing move right: {e}")
+                     # else: print("Move ignored (too soon)") # Debug
+
+                # Add other commands here if needed in the future
+                # elif command == "SOME_OTHER_COMMAND":
+                #     pass
+
+            # else: # Commands are paused
+                # print(f"Command '{command}' ignored (Paused)") # Debug
+
+    except (socket.error, ConnectionResetError) as e:
+        print(f"\n❌ Socket Error: {e}. Pi likely disconnected.")
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user (Ctrl+C).")
+        break # Exit outer loop
+    except pyautogui.FailSafeException:
+         print("\n🆘 PyAutoGUI FailSafe triggered (mouse moved to corner). Exiting.")
+         break # Exit outer loop
+    except Exception as e:
+        print(f"\n💥 An unexpected error occurred: {e}")
+        # Decide whether to break or continue listening
+        time.sleep(2) # Pause before retrying
+        # break
+
+    finally:
+        # --- Cleanup Current Connection ---
+        if conn:
+            try:
+                conn.close()
+                print("Closed connection socket.")
+            except Exception as e:
+                print(f"Error closing connection socket: {e}")
+        if server_socket:
+            try:
+                server_socket.close()
+                print("Closed server socket.")
+            except Exception as e:
+                print(f"Error closing server socket: {e}")
+        conn, server_socket = None, None # Reset variables
+        print("Waiting for new connection...")
+        time.sleep(1) # Small delay before restarting listening
+
+
+print("\nℹ️ Control receiver stopped.")
